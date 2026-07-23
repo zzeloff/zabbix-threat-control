@@ -401,11 +401,87 @@ func (p *Provisioner) createBareHost(ctx context.Context, host, name, groupID st
 	return firstID(res, "hostids")
 }
 
+// --- graphs (CVSS trend + score distribution) ---
+
+// scoreColors is a green→red palette for the 11 score buckets (0..10).
+var scoreColors = [11]string{
+	"1A7C11", "3BAB2E", "5CBA00", "8EC31F", "C3D600",
+	"E0C810", "F0A30A", "F07B00", "E85D00", "D64000", "C00000",
+}
+
+// statItemIDs maps the statistics host's item keys to their ids.
+func (p *Provisioner) statItemIDs(ctx context.Context, hostID string) map[string]string {
+	m := map[string]string{}
+	res, err := p.c.Call(ctx, "item.get", map[string]interface{}{
+		"hostids": hostID,
+		"output":  []string{"itemid", "key_"},
+	})
+	if err != nil {
+		return m
+	}
+	var rows []struct {
+		ItemID string `json:"itemid"`
+		Key    string `json:"key_"`
+	}
+	_ = json.Unmarshal(res, &rows)
+	for _, r := range rows {
+		m[r.Key] = r.ItemID
+	}
+	return m
+}
+
+// ensureGraph returns the id of a graph by name, creating it if absent. gitems
+// reference statistics-host items. Classic graphs are used (not svggraph) as
+// they render identically on Zabbix 6.0 and 7.0, including the pie graphtype.
+func (p *Provisioner) ensureGraph(ctx context.Context, name string, graphType int, gitems []map[string]interface{}) string {
+	if id, _ := p.getID(ctx, "graph.get", map[string]interface{}{
+		"filter": map[string]interface{}{"name": name}, "output": []string{"graphid"},
+	}, "graphid"); id != "" {
+		return id
+	}
+	res, err := p.c.Call(ctx, "graph.create", map[string]interface{}{
+		"name": name, "width": 900, "height": 200, "graphtype": graphType, "gitems": gitems,
+	})
+	if err != nil {
+		p.log.Warn("graph create failed", "name", name, "err", err)
+		return ""
+	}
+	id, _ := firstID(res, "graphids")
+	return id
+}
+
+// createGraphs builds the Median CVSS line graph and the score-distribution pie
+// from the statistics host items; returns their ids ("" if unavailable).
+func (p *Provisioner) createGraphs(ctx context.Context) (median, ratio string) {
+	statID, _ := p.hostID(ctx, p.cfg.Entities.StatisticsHost)
+	if statID == "" {
+		return "", ""
+	}
+	items := p.statItemIDs(ctx, statID)
+	if id := items["vulners.scoreMedian"]; id != "" {
+		median = p.ensureGraph(ctx, "Median CVSS Score", 0, []map[string]interface{}{
+			{"itemid": id, "color": "1E87F0", "drawtype": 5, "sortorder": 0},
+		})
+	}
+	var gitems []map[string]interface{}
+	for i := 0; i <= 10; i++ {
+		id := items[fmt.Sprintf("vulners.hostsCountScore%d", i)]
+		if id == "" {
+			continue
+		}
+		gitems = append(gitems, map[string]interface{}{"itemid": id, "color": scoreColors[i], "sortorder": i})
+	}
+	if len(gitems) > 0 {
+		ratio = p.ensureGraph(ctx, "CVSS Score ratio by hosts", 2, gitems) // graphtype 2 = pie
+	}
+	return median, ratio
+}
+
 // --- dashboard ---
 
 func (p *Provisioner) createDashboard(ctx context.Context) error {
 	e := p.cfg.Entities
-	widget := func(name, hostID string, x, y int) map[string]interface{} {
+	problems := func(name, hostID string, x, y int) map[string]interface{} {
 		return map[string]interface{}{
 			"type": "problems", "name": name, "x": x, "y": y, "width": 12, "height": 8,
 			"fields": []map[string]interface{}{
@@ -414,15 +490,45 @@ func (p *Provisioner) createDashboard(ctx context.Context) error {
 			},
 		}
 	}
+	graphWidget := func(name, graphID string, x, y int) map[string]interface{} {
+		return map[string]interface{}{
+			"type": "graph", "name": name, "x": x, "y": y, "width": 12, "height": 8,
+			"fields": []map[string]interface{}{
+				{"type": 0, "name": "source_type", "value": 0}, // 0 = graph
+				{"type": 6, "name": "graphid", "value": graphID},
+			},
+		}
+	}
+
 	hostsID, _ := p.hostID(ctx, e.HostsHost)
 	bulletinsID, _ := p.hostID(ctx, e.BulletinsHost)
 	packagesID, _ := p.hostID(ctx, e.PackagesHost)
+	groupID, _ := p.getID(ctx, "hostgroup.get", map[string]interface{}{
+		"filter": map[string]interface{}{"name": e.Group}, "output": []string{"groupid"},
+	}, "groupid")
+	medianGraph, ratioGraph := p.createGraphs(ctx)
 
-	widgets := []map[string]interface{}{
-		widget(e.HostsName, hostsID, 0, 0),
-		widget(e.PackagesName, packagesID, 12, 0),
-		widget(e.BulletinsName, bulletinsID, 0, 8),
+	var widgets []map[string]interface{}
+	// Severity overview across the whole Vulners group (works now that triggers
+	// carry real CVSS-based priorities).
+	if groupID != "" {
+		widgets = append(widgets, map[string]interface{}{
+			"type": "problembysv", "name": "Problems by severity", "x": 0, "y": 0, "width": 24, "height": 4,
+			"fields": []map[string]interface{}{{"type": 2, "name": "groupids.0", "value": groupID}},
+		})
 	}
+	widgets = append(widgets,
+		problems(e.HostsName, hostsID, 0, 4),
+		problems(e.PackagesName, packagesID, 12, 4),
+		problems(e.BulletinsName, bulletinsID, 0, 12),
+	)
+	if medianGraph != "" {
+		widgets = append(widgets, graphWidget("Median CVSS Score", medianGraph, 12, 12))
+	}
+	if ratioGraph != "" {
+		widgets = append(widgets, graphWidget("CVSS Score ratio by hosts", ratioGraph, 0, 20))
+	}
+
 	if err := p.backupIfExists(ctx, "dashboard", "name", e.Dashboard); err != nil {
 		return err
 	}
@@ -434,7 +540,7 @@ func (p *Provisioner) createDashboard(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	p.log.Info("created dashboard", "name", e.Dashboard)
+	p.log.Info("created dashboard", "name", e.Dashboard, "graphs", medianGraph != "" && ratioGraph != "")
 	return nil
 }
 
