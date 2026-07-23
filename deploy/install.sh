@@ -13,7 +13,7 @@
 #   ZABBIX_SERVER_PORT, ZTC_SCHEDULE, ZTC_PROVISION (1 to run provision --all).
 set -eu
 
-REPO="vulnersCom/zabbix-threat-control"
+REPO="zzeloff/zabbix-threat-control"
 BIN_DIR="/usr/local/bin"
 CFG_DIR="/etc/ztc"
 ENV_FILE="$CFG_DIR/ztc.env"
