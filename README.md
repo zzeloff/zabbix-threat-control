@@ -1,106 +1,139 @@
-# vulners-zabbix-agent (ztc)
+# Zabbix Threat Control (ztc)
 
-A Go rewrite of [zabbix-threat-control](https://github.com/vulnersCom/zabbix-threat-control):
-it turns Zabbix into a vulnerability-management view of your fleet. Hosts report
-their inventory through the standard **zabbix-agent2** (no Vulners agent), the
-`ztc` binary audits that inventory against [Vulners](https://vulners.com) and
-pushes per-host / per-package / per-bulletin findings back into Zabbix.
+**Turn the Zabbix you already run into a vulnerability-management console.**
 
-> **New to Zabbix?** Start with [`docs/guide.md`](docs/guide.md) — the scheme in
-> plain language, annotated config examples, and an FAQ.
+`ztc` reads each host's software inventory through the stock **zabbix-agent2**
+(no extra agent to deploy), audits it against [Vulners](https://vulners.com), and
+pushes **scored, per-host findings** — problems, dashboards and CVSS graphs —
+back into Zabbix. One static binary, installed in one command.
 
-## What changed vs. the Python version
+[![CI](https://github.com/vulnersCom/zabbix-threat-control/actions/workflows/ci.yml/badge.svg)](https://github.com/vulnersCom/zabbix-threat-control/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/vulnersCom/zabbix-threat-control?sort=semver)](https://github.com/vulnersCom/zabbix-threat-control/releases)
+[![License](https://img.shields.io/github/license/vulnersCom/zabbix-threat-control)](LICENSE)
 
-| Area | Old (Python) | New (Go) |
-|------|--------------|----------|
-| Vulners API | legacy audit | **v4** `audit/linux`, `audit/smart` (Windows software), **v3** `audit/winaudit` (KB) via [`go-vulners`](https://github.com/kidoz/go-vulners) |
-| Host agent | `report.py` deployed per host | **none** — native commands via zabbix-agent2 `UserParameter` (`deploy/agent`) |
-| Remediation | `system.run[<cmd>]` / ssh | whitelisted `vulners.fix[<pkg>]` + narrow sudoers (no arbitrary RCE) |
-| Platforms | Linux only | Linux **and** Windows |
-| Zabbix | 5.0–7.x branches inline | targets **7.x**; a `ZabbixClient` interface leaves room for older versions |
-| Delivery | `zabbix_sender` binary | built-in sender protocol |
-| Runtime | 4 scripts + deps | single static binary |
+![The Vulners dashboard in Zabbix](docs/img/dashboard.png)
 
-## Architecture
+> Screenshots are added by maintainers — see [`docs/img/SCREENSHOTS.md`](docs/img/SCREENSHOTS.md).
+
+## Why ztc
+
+- **No new agent, no RCE.** Hosts report inventory via standard zabbix-agent2
+  `UserParameter`s. Remediation goes through a single whitelisted key + narrow
+  sudoers — never arbitrary `system.run`.
+- **Linux _and_ Windows.** Linux packages via Vulners `audit/linux`; Windows
+  registry software via **Smart Audit** and installed KBs via `audit/kb` (with
+  per-CVE CVSS). Smart Audit is independent of the Zabbix version.
+- **Zabbix 6.0 and 7.0.** Auto-detects the API version; no per-version branches
+  to maintain on your side.
+- **Actionable, not just a list.** Findings become Zabbix **problems scored by
+  CVSS severity**, filterable **by host**, with **median-CVSS and
+  score-distribution graphs** on a ready-made dashboard.
+- **One binary.** Install with a single command; it **self-updates**.
+
+## Quick start
+
+On your Zabbix server (or any Linux host that can reach Zabbix + Vulners):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vulnersCom/zabbix-threat-control/master/deploy/install.sh | sudo sh
+```
+
+The installer asks for your Vulners API key and Zabbix connection, installs a
+systemd service, and offers to create the Zabbix entities (`ztc provision --all`).
+Then link the collection template to the hosts you want scanned — see
+[`docs/guide.md`](docs/guide.md).
+
+Other options (Docker, manual, air-gapped, bootstrap-via-Zabbix):
+[`deploy/README.md`](deploy/README.md).
+
+## How it works
 
 ```
-zabbix-agent2 (UserParameter: vulners.os/version/arch/packages | win.software/win.kb)
-        │  (collected into Zabbix items)
+ hosts: zabbix-agent2  UserParameter
+   Linux   → vulners.os / version / arch / packages
+   Windows → vulners.os / version / win.software / win.kb
+        │   (polled into Zabbix items)
         ▼
-   ztc scan ──► collect (Zabbix API) ──► audit (Vulners v4/v3) ──► aggregate ──► sender ──► Zabbix
+   ztc scan ─► collect (Zabbix API) ─► audit (Vulners) ─► aggregate ─► sender ─► Zabbix
+                                                                           │
+        problems (CVSS severity) · dashboard · graphs · vulners.host tags ◄┘
 ```
 
-Packages (`internal/`): `config`, `model`, `vulners` (Auditor + go-vulners),
-`audit` (response→model transforms), `aggregate` (matrices + LLD), `zabbix`
-(interface + v7 client + `sender`), `collect`, `provision`, `scan`.
+`ztc scan --daemon` runs the loop on a schedule; `ztc provision` creates the
+Zabbix template, report hosts, triggers and dashboard.
 
-## Build
+## What you get in Zabbix
+
+- **Report hosts:** `Vulners - Hosts`, `- Bulletins`, `- Packages`, `- Statistics`.
+- **Dashboard** with a **Problems-by-severity** overview, per-report problem
+  lists, a **Median CVSS Score** trend and a **CVSS score distribution** pie.
+- **Severity-scored problems** — each finding fires at Disaster / High / Average /
+  Warning based on its CVSS, so *Problems by severity* is meaningful.
+- **Filter by host** — every finding carries a `vulners.host` tag. In *Monitoring
+  → Problems* filter `Tags: vulners.host Equals <host>` to see one host's
+  vulnerabilities. (One finding = one (vulnerability, host) pair.)
+
+## Configuration
+
+Everything has a default; supply secrets via environment variables (they
+override the YAML file). Full example: [`config.example.yaml`](config.example.yaml).
+
+| Env | Purpose |
+|-----|---------|
+| `VULNERS_API_KEY` | Vulners API key (required) |
+| `VULNERS_BASE_URL` | self-hosted / proxy Vulners endpoint (optional) |
+| `ZABBIX_URL` | Zabbix frontend URL (JSON-RPC API) |
+| `ZABBIX_TOKEN` | API token (preferred) … |
+| `ZABBIX_USER` / `ZABBIX_PASSWORD` | … or user + password |
+| `ZABBIX_SERVER_FQDN` / `ZABBIX_SERVER_PORT` | zabbix-sender target |
+| `ZTC_SCHEDULE` | daemon scan interval (e.g. `1h`) |
+
+## Commands
 
 ```sh
-make build           # -> bin/ztc
-make test            # unit tests
+ztc scan --daemon                 # run the scan loop on a schedule
+ztc scan --once                   # a single cycle
+ztc provision --all               # create templates, report hosts, dashboard
+ztc fix --host H --package P      # remediate a package (whitelisted, opt-in)
+ztc upgrade                       # self-update to the latest release
+ztc version --check               # print version and check for updates
 ```
 
-## Configure
+## Remediation
 
-Copy `config.example.yaml` and edit, or rely on environment variables
-(`VULNERS_API_KEY`, `ZABBIX_URL`, `ZABBIX_USER`/`ZABBIX_PASSWORD` or
-`ZABBIX_TOKEN`, `ZABBIX_SERVER_FQDN`, `ZABBIX_SERVER_PORT`). Env overrides file.
-
-## Deploy the agent side (no Vulners agent)
-
-Copy the UserParameter snippet to each monitored host and restart the agent:
-
-- Linux: `deploy/agent/linux/vulners.conf` → `/etc/zabbix/zabbix_agent2.d/`
-- Windows: `deploy/agent/windows/vulners.conf` → `zabbix_agent2.d\`
-
-These expose fixed keys only — arbitrary `system.run` stays disabled, so the
-server cannot execute anything beyond the defined inventory commands.
-
-## Run
-
-```sh
-ztc provision --all              # create templates, virtual hosts, dashboard
-# link the platform template to each host you want scanned:
-#   "Template Vulners OS-Report Linux"   -> Linux hosts
-#   "Template Vulners OS-Report Windows" -> Windows hosts
-ztc scan --once                  # one audit cycle (for cron / a Zabbix item)
-ztc scan --daemon                # run continuously on the configured schedule
-ztc scan --daemon --auto-fix     # also remediate problems acknowledged by trusted users
-```
-
-## Remediation (fix)
-
-`ztc fix` invokes the whitelisted `vulners.fix[<pkg>]` key on the target's
-zabbix-agent2 — no arbitrary `system.run`. Because agent2 kills anything a
-UserParameter backgrounds, `vulners.fix` only **queues** the package; a small
-root-cron worker on the host performs the upgrade and writes an audit log. See
+`ztc fix` upgrades a vulnerable package via a whitelisted `vulners.fix[<pkg>]`
+agent key drained by a host-side worker — no arbitrary command execution. It can
+run manually or, with `scan --daemon --auto-fix`, be driven by a trusted user
+acknowledging the problem in Zabbix. Rationale:
 [`docs/adr/0001-remediation-mechanism.md`](docs/adr/0001-remediation-mechanism.md).
 
-Per host that should be remediable, deploy from `deploy/agent/linux/`:
-`vulners.conf` (adds `vulners.fix`), `vulners-fix-worker.sh` → `/usr/local/bin/`,
-`vulners-fix.cron` → `/etc/cron.d/`. Also add the ztc host's address to the
-agent's `Server=` allowlist (ztc reaches the agent's passive port 10050). No
-sudoers is needed — the worker runs as root via cron.
+## Support matrix
 
-Verify on the host: `cat /var/lib/zabbix/vulners-fix.queue` (pending) and
-`tail -f /var/log/vulners-fix.log` (worker `START`/`END rc=…` per package).
+| | |
+|---|---|
+| **Zabbix** | 6.0 LTS, 7.0 LTS (auto-detected) |
+| **OS audited** | Linux (deb/rpm/apk/…), Windows (software + KB) |
+| **ztc runs on** | Linux amd64 / arm64 |
+
+## Migrating from the Python version
+
+The original Python implementation lives in [`legacy/`](legacy/). The Go version
+is a drop-in replacement with the same Zabbix-side model; re-run
+`ztc provision --all` and re-link the templates.
+
+## Development
 
 ```sh
-ztc fix --host NAME --all              # upgrade all vulnerable packages on a host
-ztc fix --host NAME --package PKG      # upgrade one package on a host
-ztc fix --package PKG                  # upgrade PKG on every affected host
-ztc fix --host NAME --all --dry-run    # show what would be fixed
+go build ./...     # compile
+go test ./...      # unit tests (no network)
+go vet ./... && gofmt -l .
+make build         # -> bin/ztc
 ```
 
-Automatic remediation (`ztc scan --daemon --auto-fix`) only acts on Zabbix
-problems acknowledged by a user listed in `fix.trusted_users`.
+A Docker test stand (Zabbix + agent + ztc) is in
+[`deploy/docker/README.md`](deploy/docker/README.md). CI (build/test/lint) runs
+on every push; tagging a `v*` commit publishes binaries and a GHCR image.
 
-## Test stand
+## License
 
-See [`deploy/docker/README.md`](deploy/docker/README.md) for a one-command
-Zabbix 7.0 + agent + scanner environment.
-
-## Status
-
-See [`STATUS.md`](STATUS.md) for what is implemented and what is deferred.
+See [`LICENSE`](LICENSE).
