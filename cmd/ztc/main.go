@@ -18,6 +18,7 @@ import (
 	"github.com/vulnersCom/zabbix-threat-control/internal/fix"
 	"github.com/vulnersCom/zabbix-threat-control/internal/provision"
 	"github.com/vulnersCom/zabbix-threat-control/internal/scan"
+	"github.com/vulnersCom/zabbix-threat-control/internal/selfupdate"
 	"github.com/vulnersCom/zabbix-threat-control/internal/vulners"
 	"github.com/vulnersCom/zabbix-threat-control/internal/zabbix"
 	"github.com/vulnersCom/zabbix-threat-control/internal/zabbix/agentget"
@@ -45,6 +46,11 @@ func main() {
 		err = runFix(args)
 	case "version", "-v", "--version":
 		fmt.Printf("ztc %s\n", version)
+		if len(args) > 0 && (args[0] == "--check" || args[0] == "-c") {
+			checkVersion()
+		}
+	case "upgrade":
+		err = runUpgrade(args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -65,7 +71,8 @@ Usage:
   ztc scan       [--config F] [--once|--daemon] [--auto-fix] [--nopush] [--limit N] [--push-delay D]
   ztc provision  [--config F] [--all|--template --vhosts --dashboard]
   ztc fix        [--config F] (--host NAME (--all | --package PKG) | --package PKG) [--dry-run]
-  ztc version
+  ztc upgrade    [--version vX.Y.Z]   self-update the binary from GitHub Releases
+  ztc version    [--check]            print version (and check for a newer release)
 
 Environment overrides: VULNERS_API_KEY, ZABBIX_URL, ZABBIX_USER, ZABBIX_PASSWORD,
 ZABBIX_TOKEN, ZABBIX_SERVER_FQDN, ZABBIX_SERVER_PORT.
@@ -115,6 +122,57 @@ func newZabbix(ctx context.Context, cfg config.Config) (zabbix.Client, error) {
 func newFixer(cfg config.Config, zbx zabbix.Client, log *slog.Logger) *fix.Fixer {
 	getter := agentget.New(cfg.Fix.AgentTimeout.D())
 	return fix.New(zbx, getter, cfg.Fix, log)
+}
+
+// checkVersion prints whether a newer release exists (for `ztc version --check`).
+func checkVersion() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	latest, err := selfupdate.LatestVersion(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "version check failed: %v\n", err)
+		return
+	}
+	if selfupdate.IsNewer(version, latest) {
+		fmt.Printf("update available: %s (run: sudo ztc upgrade)\n", latest)
+	} else {
+		fmt.Printf("up to date (latest: %s)\n", latest)
+	}
+}
+
+// checkForUpdate logs a warning if a newer release is available. Best-effort:
+// it stays silent when the network/GitHub is unreachable.
+func checkForUpdate(ctx context.Context, log *slog.Logger) {
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	latest, err := selfupdate.LatestVersion(cctx)
+	if err != nil {
+		return
+	}
+	if selfupdate.IsNewer(version, latest) {
+		log.Warn("a newer ztc version is available", "current", version, "latest", latest, "hint", "sudo ztc upgrade")
+	}
+}
+
+func runUpgrade(args []string) error {
+	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
+	ver := fs.String("version", "", "specific version to install (default: latest)")
+	_ = fs.Parse(args)
+	log := newLogger("info")
+	target := "latest"
+	if *ver != "" {
+		target = *ver
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	log.Info("upgrading ztc", "current", version, "target", target)
+	installed, err := selfupdate.Upgrade(ctx, *ver)
+	if err != nil {
+		return err
+	}
+	log.Info("upgrade complete", "installed", installed)
+	fmt.Println("Restart the service to run the new version:  sudo systemctl restart ztc")
+	return nil
 }
 
 func runScan(args []string) error {
@@ -184,6 +242,7 @@ func runScan(args []string) error {
 
 func runDaemon(ctx context.Context, cycle func(context.Context), interval time.Duration, log *slog.Logger) error {
 	log.Info("starting scan daemon", "interval", interval)
+	go checkForUpdate(ctx, log)
 	cycle(ctx)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
