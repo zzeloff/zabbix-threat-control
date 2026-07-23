@@ -513,7 +513,7 @@ func (p *Provisioner) createDashboard(ctx context.Context) error {
 	// carry real CVSS-based priorities).
 	if groupID != "" {
 		widgets = append(widgets, map[string]interface{}{
-			"type": "problembysv", "name": "Problems by severity", "x": 0, "y": 0, "width": 24, "height": 4,
+			"type": "problemsbysv", "name": "Problems by severity", "x": 0, "y": 0, "width": 24, "height": 4,
 			"fields": []map[string]interface{}{{"type": 2, "name": "groupids.0", "value": groupID}},
 		})
 	}

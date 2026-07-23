@@ -13,8 +13,6 @@ back into Zabbix. One static binary, installed in one command.
 
 ![The Vulners dashboard in Zabbix](docs/img/dashboard.png)
 
-> Screenshots are added by maintainers — see [`docs/img/SCREENSHOTS.md`](docs/img/SCREENSHOTS.md).
-
 ## Why ztc
 
 - **No new agent, no RCE.** Hosts report inventory via standard zabbix-agent2
@@ -72,6 +70,22 @@ Zabbix template, report hosts, triggers and dashboard.
 - **Filter by host** — every finding carries a `vulners.host` tag. In *Monitoring
   → Problems* filter `Tags: vulners.host Equals <host>` to see one host's
   vulnerabilities. (One finding = one (vulnerability, host) pair.)
+
+**Median CVSS trend and score distribution across the fleet:**
+
+![Median CVSS Score trend and CVSS score distribution](docs/img/graphs.png)
+
+**Severity breakdown** — real Disaster / High / Average / Warning counts, not one grey "Not classified" bar:
+
+![Problems by severity](docs/img/problems-by-severity.png)
+
+**One host's vulnerabilities** via the `vulners.host` tag filter:
+
+![Filter problems by the vulners.host tag](docs/img/filter-by-host.png)
+
+**A single finding** — scored by CVSS, tagged with its host, linked to vulners.com:
+
+![A scored, tagged Vulners problem](docs/img/problem-detail.png)
 
 ## Configuration
 
