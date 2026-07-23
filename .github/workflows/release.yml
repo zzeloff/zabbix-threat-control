@@ -41,10 +41,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # GHCR image names must be lowercase; derive from the owning repo so this
+      # works in forks/test repos too.
+      - id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zabbix-threat-control" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/vulnerscom/zabbix-threat-control
+          images: ${{ steps.img.outputs.name }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

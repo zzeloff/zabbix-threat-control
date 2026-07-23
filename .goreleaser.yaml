@@ -47,8 +47,7 @@ changelog:
       - "^chore:"
 
 release:
-  github:
-    owner: vulnersCom
-    name: zabbix-threat-control
+  # owner/name are auto-detected from the git remote, so this works unchanged
+  # in a fork or a test repository.
   draft: false
   prerelease: auto
