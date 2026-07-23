@@ -1,210 +1,106 @@
-#### :bangbang: Updated Zabbix Threat Control to version 2.0 :bangbang:
-💥 Update breaks the plugin's normal operation!</br>
-To make it work, please read the [Update instructions](https://github.com/vulnersCom/zabbix-threat-control/issues/16).</br>
-And there's live-chat in Telegram, for technical support use our Telegram live-chat: [@ztcsupport](https://t.me/ztcsupport)
+# vulners-zabbix-agent (ztc)
 
-----
+A Go rewrite of [zabbix-threat-control](https://github.com/vulnersCom/zabbix-threat-control):
+it turns Zabbix into a vulnerability-management view of your fleet. Hosts report
+their inventory through the standard **zabbix-agent2** (no Vulners agent), the
+`ztc` binary audits that inventory against [Vulners](https://vulners.com) and
+pushes per-host / per-package / per-bulletin findings back into Zabbix.
 
-# Zabbix Threat Control
+> **New to Zabbix?** Start with [`docs/guide.md`](docs/guide.md) — the scheme in
+> plain language, annotated config examples, and an FAQ.
 
-Оur plugin transforms your Zabbix monitoring system into vulnerability, risk and security managment system for your infrastructure.
+## What changed vs. the Python version
 
-  * [What the plugin does](#what-the-plugin-does)
-  * [How the plugin works](#how-the-plugin-works)
-  * [Requirements](#requirements)
-  * [Installation](#installation)
-  * [Сonfiguration](#configuration)
-  * [Execution](#execution)
-  * [Usage](#usage)
-  
-## What the plugin does
+| Area | Old (Python) | New (Go) |
+|------|--------------|----------|
+| Vulners API | legacy audit | **v4** `audit/linux`, `audit/smart` (Windows software), **v3** `audit/winaudit` (KB) via [`go-vulners`](https://github.com/kidoz/go-vulners) |
+| Host agent | `report.py` deployed per host | **none** — native commands via zabbix-agent2 `UserParameter` (`deploy/agent`) |
+| Remediation | `system.run[<cmd>]` / ssh | whitelisted `vulners.fix[<pkg>]` + narrow sudoers (no arbitrary RCE) |
+| Platforms | Linux only | Linux **and** Windows |
+| Zabbix | 5.0–7.x branches inline | targets **7.x**; a `ZabbixClient` interface leaves room for older versions |
+| Delivery | `zabbix_sender` binary | built-in sender protocol |
+| Runtime | 4 scripts + deps | single static binary |
 
-It provides Zabbix with information about vulnerabilities existing in your entire infrastructure and suggests easily applicable remediation plans.
-
-![](https://github.com/vulnersCom/zabbix-threat-control/blob/master/media/dashboard.png)
-
-Information is displayed in Zabbix in the following format:
-
-- Maximum CVSS score for each server.
-- Command for fixing all detected vulnerabilities for each server.
-- List of security bulletins with descriptions for vulnerable packages valid for your infrastructure.
-- List of all vulnerable packages in your infrastructure.
-
-
-![](https://github.com/vulnersCom/zabbix-threat-control/blob/master/media/hosts.gif)
-
-
-Security bulletins and packages information includes:
-
-- Impact index for the infrastructure.
-- CVSS score of a package or a bulletin.
-- Number of affected servers.
-- A detailed list of affected hosts.
-- Hyperlink to the description of a bulletin.
-
-![](https://github.com/vulnersCom/zabbix-threat-control/blob/master/media/packages.gif)
-
-Sometimes it is impossible to update all packages on all servers to a version that fixes existing vulnerabilities. The proposed representation permits you to selectively update servers or packages.
-
-This approach allows one to fix vulnerabilities using different strategies:
-
-- all vulnerabilities on a specific server;
-- a single vulnerability in the entire infrastructure.
-
-This can be done directly from Zabbix (using its standard functionality) either on the administrator command or automatically.
-
-## How the plugin works
-
-- Using Zabbix API, the plugin receives lists of installed packages, names and versions of the OS from all the servers in the infrastructure (if the "Vulners OS-Report" template is linked with them).
-- Transmits the data to Vulners
-- Receives information on the vulnerabilities for each server.
-- Processes the received information, aggregates it and sends it back to Zabbix via zabbix-sender.
-- Finally the result is displayed in Zabbix.
-
-## Requirements
-
-**On zabbix-server host:**
-
-- python 3 (only for ztc scripts)
-- python modules: pyzabbix, jpath, requests, vulners
-- zabbix version 3.4 is required to create a custom dashboard and a custom polling schedule.
-- zabbix-sender utility for sending data to zabbix-server.
-- zabbix-get utility for sending a command to fix vulnerabilities on the server.
-
-**On all the servers that require a vulnerability scan:**
-
-- zabbix-agent for collect data and run scripts.
-
-## Installation
-
-### RHEL, CentOS and other RPM-based
-
-    rpm -Uhv https://repo.vulners.com/redhat/vulners-repo.rpm
-
-**On zabbix-server host:**
-
-    yum install zabbix-threat-control-main zabbix-threat-control-host
-
-**On all the servers that require a vulnerability scan:**
-
-    yum install zabbix-threat-control-host
-
-
-### Debian and other debian-based
-
-    wget https://repo.vulners.com/vulners-repo-py3.deb
-    dpkg -i vulners-repo-py3.deb
-
-**On zabbix-server host:**
-
-    apt-get update && apt-get install zabbix-threat-control-main zabbix-threat-control-host
-
-**On all the servers that require a vulnerability scan:**
-
-    apt-get update && apt-get install zabbix-threat-control-host
-
-### From source
-
-**On zabbix-server host:**
-
-    git clone https://github.com/vulnersCom/zabbix-threat-control.git
-    mkdir -p /opt/monitoring/zabbix-threat-control
-    cp -R zabbix-threat-control/os-report /opt/monitoring/
-    cp zabbix-threat-control/*.py /opt/monitoring/zabbix-threat-control/
-    cp zabbix-threat-control/*.conf /opt/monitoring/zabbix-threat-control/
-    chown -R zabbix:zabbix /opt/monitoring/
-    chmod 640 /opt/monitoring/zabbix-threat-control/*.conf
-    touch /var/log/zabbix-threat-control.log
-    chown zabbix:zabbix /var/log/zabbix-threat-control.log
-    chmod 664 /var/log/zabbix-threat-control.log
-
-**On all the servers that require a vulnerability scan:**
-
-    git clone https://github.com/vulnersCom/zabbix-threat-control.git
-    mkdir -p /opt/monitoring/
-    cp -R zabbix-threat-control/os-report /opt/monitoring/
-    chown -R zabbix:zabbix /opt/monitoring/os-report
-
-## Configuration
-
-The configuration file is located here: `/opt/monitoring/zabbix-threat-control/ztc.conf`
-
-### Vulners credentials
-
-To use Vulners API you need an api-key. To get it follow the steps bellow:
-- Log in to vulners.com.
-- Navigate to the userinfo space https://vulners.com/userinfo.
-- Choose the "API KEYS" section.
-- Select "scan" in the scope menu and click "Generate a new key".
-- You will get an api-key, which looks like this:
-**RGB9YPJG7CFAXP35PMDVYFFJPGZ9ZIRO1VGO9K9269B0K86K6XQQQR32O6007NUK**
-
-Now you need to add the Vulners api-key into your configuration file (parameter ```VulnersApiKey```).
+## Architecture
 
 ```
-VulnersApiKey = RGB9YPJG7CFAXP35PMDVYFFJPGZ9ZIRO1VGO9K9269B0K86K6XQQQR32O6007NUK
+zabbix-agent2 (UserParameter: vulners.os/version/arch/packages | win.software/win.kb)
+        │  (collected into Zabbix items)
+        ▼
+   ztc scan ──► collect (Zabbix API) ──► audit (Vulners v4/v3) ──► aggregate ──► sender ──► Zabbix
 ```
 
+Packages (`internal/`): `config`, `model`, `vulners` (Auditor + go-vulners),
+`audit` (response→model transforms), `aggregate` (matrices + LLD), `zabbix`
+(interface + v7 client + `sender`), `collect`, `provision`, `scan`.
 
-### Zabbix credentials
+## Build
 
-In order to connect to Zabbix you need to specify the following in the configuration file:
--	The URL, username and password. Note that the User should have rights to create groups, hosts and templates in Zabbix.
--	Domain name and port of the Zabbix-server for pushing data using the zabbix-sender.
-
-Here is an example of a valid config file:
-
-```
-ZabbixApiUser = yourlogin
-ZabbixApiPassword = yourpassword
-ZabbixFrontUrl = https://zabbixfront.yourdomain.com
-
-ZabbixServerFQDN = zabbixserver.yourdomain.com
-ZabbixServerPort = 10051
+```sh
+make build           # -> bin/ztc
+make test            # unit tests
 ```
 
-### Zabbix entity
+## Configure
 
-1. To create all the necessary objects in Zabbix, run the `prepare.py` script with parameters.</br>
-`/opt/monitoring/zabbix-threat-control/prepare.py -uvtd`</br>It will verify that zabbix-agent and zabbix-get utilities are configured correctly and create the following objects using Zabbix API:
-   * **A template** used to collect data from servers.
-   * **Zabbix hosts** for obtaining data on vulnerabilities.
-   * **An action** to run the command fixes the vulnerability.
-   * **A dashboard** for displaying results.
-2. While using the Zabbix web interface, it is necessary to link the "Vulners OS-Report" template with the hosts that you are doing a vulnerabilities scan on.
+Copy `config.example.yaml` and edit, or rely on environment variables
+(`VULNERS_API_KEY`, `ZABBIX_URL`, `ZABBIX_USER`/`ZABBIX_PASSWORD` or
+`ZABBIX_TOKEN`, `ZABBIX_SERVER_FQDN`, `ZABBIX_SERVER_PORT`). Env overrides file.
 
-### Servers that require a vulnerability scan
+## Deploy the agent side (no Vulners agent)
 
-Zabbix-agent must be able to execute remote commands. For this, change the parameters in the zabbix-agent configuration file `/etc/zabbix/zabbix_agentd.conf`:
+Copy the UserParameter snippet to each monitored host and restart the agent:
 
+- Linux: `deploy/agent/linux/vulners.conf` → `/etc/zabbix/zabbix_agent2.d/`
+- Windows: `deploy/agent/windows/vulners.conf` → `zabbix_agent2.d\`
+
+These expose fixed keys only — arbitrary `system.run` stays disabled, so the
+server cannot execute anything beyond the defined inventory commands.
+
+## Run
+
+```sh
+ztc provision --all              # create templates, virtual hosts, dashboard
+# link the platform template to each host you want scanned:
+#   "Template Vulners OS-Report Linux"   -> Linux hosts
+#   "Template Vulners OS-Report Windows" -> Windows hosts
+ztc scan --once                  # one audit cycle (for cron / a Zabbix item)
+ztc scan --daemon                # run continuously on the configured schedule
+ztc scan --daemon --auto-fix     # also remediate problems acknowledged by trusted users
 ```
-EnableRemoteCommands=1
-LogRemoteCommands=1
-``` 
 
-Zabbix-agent must be able to update packages as root. For this, add a line to the file `/etc/sudoers`:
+## Remediation (fix)
 
+`ztc fix` invokes the whitelisted `vulners.fix[<pkg>]` key on the target's
+zabbix-agent2 — no arbitrary `system.run`. Because agent2 kills anything a
+UserParameter backgrounds, `vulners.fix` only **queues** the package; a small
+root-cron worker on the host performs the upgrade and writes an audit log. See
+[`docs/adr/0001-remediation-mechanism.md`](docs/adr/0001-remediation-mechanism.md).
+
+Per host that should be remediable, deploy from `deploy/agent/linux/`:
+`vulners.conf` (adds `vulners.fix`), `vulners-fix-worker.sh` → `/usr/local/bin/`,
+`vulners-fix.cron` → `/etc/cron.d/`. Also add the ztc host's address to the
+agent's `Server=` allowlist (ztc reaches the agent's passive port 10050). No
+sudoers is needed — the worker runs as root via cron.
+
+Verify on the host: `cat /var/lib/zabbix/vulners-fix.queue` (pending) and
+`tail -f /var/log/vulners-fix.log` (worker `START`/`END rc=…` per package).
+
+```sh
+ztc fix --host NAME --all              # upgrade all vulnerable packages on a host
+ztc fix --host NAME --package PKG      # upgrade one package on a host
+ztc fix --package PKG                  # upgrade PKG on every affected host
+ztc fix --host NAME --all --dry-run    # show what would be fixed
 ```
-zabbix ALL=(ALL) NOPASSWD: /usr/bin/yum -y update *
-zabbix ALL=(ALL) NOPASSWD: /usr/bin/apt-get --assume-yes install --only-upgrade *
-```
 
-## Execution
+Automatic remediation (`ztc scan --daemon --auto-fix`) only acts on Zabbix
+problems acknowledged by a user listed in `fix.trusted_users`.
 
-- `/opt/monitoring/os-report/report.py`<br />
-  Transfers the name, version and installed packages of the operating system to Zabbix.<br />
-  Runs with zabbix-agent on all hosts to which the template "Vulners OS-Report" is linked.
+## Test stand
 
-- `/opt/monitoring/zabbix-threat-control/scan.py`<br />
-  Processes raw data from zabbix and vulners and push them to the monitoring system using zabbix-sender.<br />
-  Runs with zabbix-agent on the Zabbix server via the item "Service item" on the host "Vulners - Statistics".
+See [`deploy/docker/README.md`](deploy/docker/README.md) for a one-command
+Zabbix 7.0 + agent + scanner environment.
 
-The above scripts are run once a day. The start-up time is selected randomly during the installation and does not change during operation.
-  
-- `/opt/monitoring/zabbix-threat-control/fix.py`<br />
-  Runs commands to fix vulnerabilities on servers. It's executed as a remote command in the action "Vunlers" in Zabbix. 
-   
+## Status
 
-## Usage
-It will be ready soon...
-
+See [`STATUS.md`](STATUS.md) for what is implemented and what is deferred.
