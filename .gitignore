@@ -1,0 +1,14 @@
+# build artifacts
+/bin/
+*.exe
+/ztc
+# legacy python
+__pycache__/
+*.pyc
+venv/
+# editor / os
+.idea/
+.DS_Store
+
+# local prod secrets
+deploy/docker/ztc.env
